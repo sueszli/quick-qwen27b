@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["huggingface_hub"]
+# ///
 from __future__ import annotations
 
 import atexit
@@ -12,66 +16,115 @@ import subprocess
 import tarfile
 import time
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 from huggingface_hub import hf_hub_download
 
 
-def set_seed(seed: int) -> int:
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    if np := importlib.util.find_spec("numpy") and importlib.import_module("numpy"):
-        np.random.seed(seed)
-    if torch := importlib.util.find_spec("torch") and importlib.import_module("torch"):
+class Seed:
+    @staticmethod
+    def everywhere(seed: int) -> None:
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        random.seed(seed)
+        Seed.numpy(seed)
+        Seed.torch(seed)
+
+    @staticmethod
+    def numpy(seed: int) -> None:
+        if importlib.util.find_spec("numpy") is None:
+            return
+        importlib.import_module("numpy").random.seed(seed)
+
+    @staticmethod
+    def torch(seed: int) -> None:
+        if importlib.util.find_spec("torch") is None:
+            return
+        torch = importlib.import_module("torch")
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True, warn_only=True)
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    return seed
 
 
-def server_binary(weights_dir: Path, tag: str = "b10908") -> Path:
-    root = weights_dir / f"llama.cpp-{tag}"
-    binary = root / "llama-server"
-    if not binary.exists():
+class Download:
+    @staticmethod
+    def llama_server(weights_dir: Path, tag: str = "b10908") -> Path:
+        root = weights_dir / f"llama.cpp-{tag}"
+        if (root / "llama-server").exists():
+            return root / "llama-server"
         root.mkdir(parents=True, exist_ok=True)
-        archive = root / "llama.tar.gz"
-        urllib.request.urlretrieve(f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", archive)
-        with tarfile.open(archive) as tar:
-            tar.extractall(root, filter=lambda m, _: m.replace(name=m.name.split("/", 1)[1]) if "/" in m.name else None)
-        archive.unlink()
-    return binary
+        urllib.request.urlretrieve(f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", root / "llama.tar.gz")
+        with tarfile.open(root / "llama.tar.gz") as tar:
+            tar.extractall(root, filter=Download.strip_top_dir)
+        (root / "llama.tar.gz").unlink()
+        return root / "llama-server"
+
+    @staticmethod
+    def strip_top_dir(member: tarfile.TarInfo, _: str) -> tarfile.TarInfo | None:
+        return member.replace(name=member.name.split("/", 1)[1]) if "/" in member.name else None
+
+    @staticmethod
+    def gguf(weights_dir: Path, repo: str, filename: str) -> Path:
+        return Path(hf_hub_download(repo, filename, local_dir=weights_dir / repo.split("/")[1], cache_dir=weights_dir / "hf"))
+
+    @staticmethod
+    def image_bytes(image: str | Path) -> bytes:
+        if not str(image).startswith(("http://", "https://")):
+            return Path(image).read_bytes()
+        return urllib.request.urlopen(urllib.request.Request(str(image), headers={"user-agent": "quick-qwen27b"})).read()
 
 
-def model_files(weights_dir: Path, repo: str, model: str, mmproj: str) -> tuple[Path, Path]:
-    local = weights_dir / repo.split("/")[1]
-    return tuple(Path(hf_hub_download(repo, f, local_dir=local, cache_dir=weights_dir / "hf")) for f in (model, mmproj))
+class Server:
+    @staticmethod
+    def free_port() -> int:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    @staticmethod
+    def is_healthy(port: int) -> bool:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def wait_until_healthy(proc: subprocess.Popen, port: int, log: Path, timeout_s: int = 600) -> None:
+        for _ in range(timeout_s):
+            if proc.poll() is not None:
+                raise RuntimeError(f"llama-server exited, see {log}")
+            if Server.is_healthy(port):
+                return
+            time.sleep(1)
+        raise TimeoutError(f"llama-server did not come up, see {log}")
+
+    @staticmethod
+    def post_json(port: int, path: str, body: dict) -> dict:
+        request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", json.dumps(body).encode(), {"content-type": "application/json"})
+        with urllib.request.urlopen(request, timeout=24 * 3600) as response:
+            return json.load(response)
 
 
-def _image_part(image: str | Path) -> dict:
-    if str(image).startswith("data:"):
-        return {"type": "image_url", "image_url": {"url": str(image)}}
-    remote = str(image).startswith(("http://", "https://"))
-    data = urllib.request.urlopen(urllib.request.Request(str(image), headers={"user-agent": "quick-qwen27b"})).read() if remote else Path(image).read_bytes()
-    mime = mimetypes.guess_type(str(image))[0] or "image/png"
-    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}
+class Message:
+    @staticmethod
+    def image_part(image: str | Path) -> dict:
+        if str(image).startswith("data:"):
+            return {"type": "image_url", "image_url": {"url": str(image)}}
+        mime = mimetypes.guess_type(str(image))[0] or "image/png"
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(Download.image_bytes(image)).decode()}"}}
 
+    @staticmethod
+    def user(text: str | None, images: list[str | Path]) -> dict:
+        return {"role": "user", "content": [Message.image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])}
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _healthy(port: int) -> bool:
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
-        return True
-    except OSError:
-        return False
+    @staticmethod
+    def sampling(think: bool) -> dict:
+        return {"top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **({"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8})}
 
 
 @dataclass
@@ -81,52 +134,30 @@ class Response:
     usage: dict
 
 
-@dataclass
 class Qwen:
-    repo: str = "unsloth/Qwen3.5-27B-GGUF"
-    model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf"
-    mmproj: str = "mmproj-F16.gguf"
-    ctx: int = 65536
-    seed: int = 41
-    port: int = 0
-    weights_dir: Path = Path(__file__).resolve().parent / "weights"
-    _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
-
-    def __post_init__(self):
-        set_seed(self.seed)
-        model, mmproj = model_files(self.weights_dir, self.repo, self.model, self.mmproj)
-        self.port = self.port or _free_port()
-        cmd = [str(server_binary(self.weights_dir)), "-m", str(model), "--mmproj", str(mmproj), "-ngl", "99", "-c", str(self.ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(self.seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
-        log = self.weights_dir / "llama-server.log"
-        with log.open("w") as f:
-            self._proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+    def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 65536, seed: int = 41, port: int = 0):
+        Seed.everywhere(seed)
+        weights_dir = Path(weights_dir or Path(__file__).resolve().parent / "weights")
+        self.seed = seed
+        self.port = port or Server.free_port()
+        self.log = weights_dir / "llama-server.log"
+        cmd = [str(Download.llama_server(weights_dir)), "-m", str(Download.gguf(weights_dir, repo, model)), "--mmproj", str(Download.gguf(weights_dir, repo, mmproj)), "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
+        self.proc = subprocess.Popen(cmd, stdout=self.log.open("w"), stderr=subprocess.STDOUT)
         atexit.register(self.close)
-        for _ in range(600):
-            if self._proc.poll() is not None:
-                raise RuntimeError(f"llama-server exited, see {log}")
-            if _healthy(self.port):
-                return
-            time.sleep(1)
-        raise TimeoutError(f"llama-server did not come up, see {log}")
+        Server.wait_until_healthy(self.proc, self.port, self.log)
 
-    def close(self):
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-            self._proc.wait()
+    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
+        messages = ([{"role": "system", "content": system}] if system else []) + [Message.user(text, [images] if isinstance(images, (str, Path)) else list(images or []))]
+        data = Server.post_json(self.port, "/v1/chat/completions", {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, **Message.sampling(think)})
+        return Response(data["choices"][0]["message"].get("content") or "", data["choices"][0]["message"].get("reasoning_content") or "", data["usage"])
 
-    def __enter__(self):
+    def close(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait()
+
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_) -> None:
         self.close()
-
-    def chat(self, text: str | None = None, images: list[str | Path] | str | Path = (), think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
-        images = [images] if isinstance(images, (str, Path)) else list(images)
-        content = [_image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
-        messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
-        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **({"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8})}
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
-        with urllib.request.urlopen(req, timeout=24 * 3600) as r:
-            data = json.load(r)
-        message = data["choices"][0]["message"]
-        return Response(message.get("content") or "", message.get("reasoning_content") or "", data["usage"])
