@@ -1,0 +1,29 @@
+  __ ___      __ ___  _ __
+ / _` \ \ /\ / // _ \| '_ \
+| (_| |\ V  V /|  __/| | | |
+ \__, | \_/\_/  \___||_| |_|
+    |_|
+
+local Qwen3.5-27B inference, text and vision, in one file.
+
+downloads a pinned llama.cpp release and the unsloth
+Q5_K_XL GGUF on first use, runs llama-server on a free
+port, talks to it over the OpenAI chat api. fits a 24 GB
+card with 64k context.
+
+    $ uv add git+https://github.com/sueszli/qwen
+
+    from qwen import Qwen
+
+    with Qwen() as llm:
+        r = llm.chat("why is the sky blue?")
+        r = llm.chat("what is this?", images="photo.png")
+        r = llm.chat(images="photo.png", think=False)
+        print(r.reasoning, r.content, r.usage)
+
+    $ QWEN_WEIGHTS_DIR=/somewhere uv run example.py
+
+references:
+
+- https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
+- https://github.com/ggml-org/llama.cpp

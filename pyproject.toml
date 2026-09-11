@@ -1,0 +1,17 @@
+[project]
+name = "qwen"
+version = "0.1.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "huggingface_hub",
+    "pillow",
+    "pytest",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.19,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv]
+build-backend = { module-root = "", namespace = true }
