@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 import time
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -121,18 +122,32 @@ class Qwen:
         self.port = port
         self.proc = start_llama_server(weights_dir, repo, model, mmproj, ctx, seed, port)
 
-    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
+    def stream(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Iterator[tuple[str, str | dict]]:
         images = [images] if isinstance(images, (str, Path)) else list(images or [])
         assert text or images, "need text or at least one image"
         content = [encode_image(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
         sampling = {"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8}
-        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **sampling}
+        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "stream": True, "stream_options": {"include_usage": True}, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **sampling}
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
         with urllib.request.urlopen(request, timeout=24 * 3600) as response:
-            message = json.load(response)
-        assert message.get("choices"), f"no choices in response: {message}"
-        return Response(message["choices"][0]["message"].get("content") or "", message["choices"][0]["message"].get("reasoning_content") or "", message["usage"])
+            for line in response:
+                if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
+                    continue
+                chunk = json.loads(line[6:])
+                delta = chunk["choices"][0]["delta"] if chunk.get("choices") else {}
+                if delta.get("reasoning_content"):
+                    yield "reasoning", delta["reasoning_content"]
+                if delta.get("content"):
+                    yield "content", delta["content"]
+                if chunk.get("usage"):
+                    yield "usage", chunk["usage"]
+
+    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
+        parts = {"reasoning": [], "content": [], "usage": [{}]}
+        for kind, value in self.stream(text, images, think, max_tokens, system):
+            parts[kind].append(value)
+        return Response("".join(parts["content"]), "".join(parts["reasoning"]), parts["usage"][-1])
 
     def close(self) -> None:
         if self.proc.poll() is None:
