@@ -2,8 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = ["huggingface_hub"]
 # ///
-from __future__ import annotations
-
 import atexit
 import base64
 import importlib.util
