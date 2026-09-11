@@ -1,15 +1,14 @@
-  __ ___      __ ___  _ __
- / _` \ \ /\ / // _ \| '_ \
-| (_| |\ V  V /|  __/| | | |
- \__, | \_/\_/  \___||_| |_|
-    |_|
+  ____ __      _____  ____
+ / __ `/ | /| / / _ \/ __ \
+/ /_/ /| |/ |/ /  __/ / / /
+\__, / |__/|__/\___/_/ /_/
+  /_/
 
-local Qwen3.5-27B inference, text and vision, in one file.
+local Qwen3.5-27B, text and vision, one file.
 
-downloads a pinned llama.cpp release and the unsloth
-Q5_K_XL GGUF on first use, runs llama-server on a free
-port, talks to it over the OpenAI chat api. fits a 24 GB
-card with 64k context.
+fetches llama.cpp and the Q5_K_XL GGUF on first use,
+spawns llama-server, speaks OpenAI chat. 24 GB card,
+64k context.
 
     $ uv add git+https://github.com/sueszli/quick-qwen27b
 
