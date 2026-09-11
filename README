@@ -14,12 +14,12 @@ spawns llama-server, speaks OpenAI chat. 24 GB card,
 
     from qwen import Qwen
 
-    with Qwen() as llm:
+    with Qwen(weights_dir="/somewhere") as llm:
         r = llm.chat("why is the sky blue?")
         r = llm.chat("what is this?", images="photo.png")
         r = llm.chat(images="photo.png", think=False)
         print(r.reasoning, r.content, r.usage)
 
-    $ QWEN_WEIGHTS_DIR=/somewhere uv run example.py
+    $ uv run example.py
 
 https://huggingface.co/unsloth/Qwen3.5-27B-GGUF

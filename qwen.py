@@ -17,8 +17,6 @@ from pathlib import Path
 
 from huggingface_hub import hf_hub_download
 
-WEIGHTS_DIR = Path(os.environ.get("QWEN_WEIGHTS_DIR", Path(__file__).resolve().parent / "weights"))
-
 
 def set_seed(seed: int) -> int:
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -35,8 +33,8 @@ def set_seed(seed: int) -> int:
     return seed
 
 
-def server_binary(tag: str = "b10908") -> Path:
-    root = WEIGHTS_DIR / f"llama.cpp-{tag}"
+def server_binary(weights_dir: Path, tag: str = "b10908") -> Path:
+    root = weights_dir / f"llama.cpp-{tag}"
     binary = root / "llama-server"
     if not binary.exists():
         root.mkdir(parents=True, exist_ok=True)
@@ -48,16 +46,18 @@ def server_binary(tag: str = "b10908") -> Path:
     return binary
 
 
-def model_files(repo: str, model: str, mmproj: str) -> tuple[Path, Path]:
-    local = WEIGHTS_DIR / repo.split("/")[1]
-    return tuple(Path(hf_hub_download(repo, f, local_dir=local, cache_dir=WEIGHTS_DIR / "hf")) for f in (model, mmproj))
+def model_files(weights_dir: Path, repo: str, model: str, mmproj: str) -> tuple[Path, Path]:
+    local = weights_dir / repo.split("/")[1]
+    return tuple(Path(hf_hub_download(repo, f, local_dir=local, cache_dir=weights_dir / "hf")) for f in (model, mmproj))
 
 
 def _image_part(image: str | Path) -> dict:
-    if str(image).startswith(("http://", "https://", "data:")):
+    if str(image).startswith("data:"):
         return {"type": "image_url", "image_url": {"url": str(image)}}
+    remote = str(image).startswith(("http://", "https://"))
+    data = urllib.request.urlopen(urllib.request.Request(str(image), headers={"user-agent": "quick-qwen27b"})).read() if remote else Path(image).read_bytes()
     mime = mimetypes.guess_type(str(image))[0] or "image/png"
-    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(Path(image).read_bytes()).decode()}"}}
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}
 
 
 def _free_port() -> int:
@@ -89,14 +89,15 @@ class Qwen:
     ctx: int = 65536
     seed: int = 41
     port: int = 0
+    weights_dir: Path = Path(__file__).resolve().parent / "weights"
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         set_seed(self.seed)
-        model, mmproj = model_files(self.repo, self.model, self.mmproj)
+        model, mmproj = model_files(self.weights_dir, self.repo, self.model, self.mmproj)
         self.port = self.port or _free_port()
-        cmd = [str(server_binary()), "-m", str(model), "--mmproj", str(mmproj), "-ngl", "99", "-c", str(self.ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(self.seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
-        log = WEIGHTS_DIR / "llama-server.log"
+        cmd = [str(server_binary(self.weights_dir)), "-m", str(model), "--mmproj", str(mmproj), "-ngl", "99", "-c", str(self.ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(self.seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
+        log = self.weights_dir / "llama-server.log"
         with log.open("w") as f:
             self._proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
         atexit.register(self.close)

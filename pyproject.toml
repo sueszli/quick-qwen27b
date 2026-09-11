@@ -5,7 +5,6 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "huggingface_hub",
-    "pillow",
 ]
 
 [build-system]
