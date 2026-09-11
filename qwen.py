@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import atexit
 import base64
+import importlib.util
 import json
 import mimetypes
 import os
+import random
 import socket
 import subprocess
 import tarfile
@@ -16,6 +18,21 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 
 WEIGHTS_DIR = Path(os.environ.get("QWEN_WEIGHTS_DIR", Path(__file__).resolve().parent / "weights"))
+
+
+def set_seed(seed: int) -> int:
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    if np := importlib.util.find_spec("numpy") and importlib.import_module("numpy"):
+        np.random.seed(seed)
+    if torch := importlib.util.find_spec("torch") and importlib.import_module("torch"):
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    return seed
 
 
 def server_binary(tag: str = "b10908") -> Path:
@@ -75,6 +92,7 @@ class Qwen:
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
+        set_seed(self.seed)
         model, mmproj = model_files(self.repo, self.model, self.mmproj)
         self.port = self.port or _free_port()
         cmd = [str(server_binary()), "-m", str(model), "--mmproj", str(mmproj), "-ngl", "99", "-c", str(self.ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(self.seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
