@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Self
 
 
+#
+# utils
+#
+
+
 def set_storage(weights_dir: Path) -> Path:
     weights_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(weights_dir / "hf")
@@ -55,6 +60,11 @@ def set_seed(seed: int = 41) -> int:
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True, warn_only=True)
     return seed
+
+
+#
+# setup + inference
+#
 
 
 class Download:
