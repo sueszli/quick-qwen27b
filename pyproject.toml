@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "huggingface_hub",
     "pillow",
-    "pytest",
 ]
 
 [build-system]
