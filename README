@@ -4,22 +4,10 @@
 \__, / |__/|__/\___/_/ /_/
   /_/
 
-local Qwen3.5-27B, text and vision, one file.
+quick setup of https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
 
-fetches llama.cpp and the Q5_K_XL GGUF on first use,
-spawns llama-server, speaks OpenAI chat. 24 GB card,
-64k context.
+currently the best model for your GeForce RTX 3090 Ti
 
-    $ uv add git+https://github.com/sueszli/quick-qwen27b
-
-    from qwen import Qwen
-
-    with Qwen(weights_dir="/somewhere") as llm:
-        r = llm.chat("why is the sky blue?")
-        r = llm.chat("what is this?", images="photo.png")
-        r = llm.chat(images="photo.png", think=False)
-        print(r.reasoning, r.content, r.usage)
+quick demo:
 
     $ uv run example.py
-
-https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
