@@ -22,7 +22,4 @@ spawns llama-server, speaks OpenAI chat. 24 GB card,
 
     $ QWEN_WEIGHTS_DIR=/somewhere uv run example.py
 
-references:
-
-- https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
-- https://github.com/ggml-org/llama.cpp
+https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
