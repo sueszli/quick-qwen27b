@@ -15,34 +15,23 @@ from pathlib import Path
 
 from huggingface_hub import hf_hub_download
 
-SEED = 41
 WEIGHTS_DIR = Path(os.environ.get("QWEN_WEIGHTS_DIR", Path(__file__).resolve().parent / "weights"))
-LLAMA_CPP_TAG = "b10908"
-LLAMA_CPP_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP_TAG}/llama-{LLAMA_CPP_TAG}-bin-ubuntu-vulkan-x64.tar.gz"
-
-REPO = "unsloth/Qwen3.5-27B-GGUF"
-MODEL_FILE = "Qwen3.5-27B-UD-Q5_K_XL.gguf"
-MMPROJ_FILE = "mmproj-F16.gguf"
-CTX = 65536
-
-THINKING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5}
-INSTRUCT = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5}
 
 
-def server_binary() -> Path:
-    root = WEIGHTS_DIR / f"llama.cpp-{LLAMA_CPP_TAG}"
+def server_binary(tag: str = "b10908") -> Path:
+    root = WEIGHTS_DIR / f"llama.cpp-{tag}"
     binary = root / "llama-server"
     if not binary.exists():
         root.mkdir(parents=True, exist_ok=True)
         archive = root / "llama.tar.gz"
-        urllib.request.urlretrieve(LLAMA_CPP_URL, archive)
+        urllib.request.urlretrieve(f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", archive)
         with tarfile.open(archive) as tar:
             tar.extractall(root, filter=lambda m, _: m.replace(name=m.name.split("/", 1)[1]) if "/" in m.name else None)
         archive.unlink()
     return binary
 
 
-def model_files(repo: str = REPO, model: str = MODEL_FILE, mmproj: str = MMPROJ_FILE) -> tuple[Path, Path]:
+def model_files(repo: str, model: str, mmproj: str) -> tuple[Path, Path]:
     local = WEIGHTS_DIR / repo.split("/")[1]
     return tuple(Path(hf_hub_download(repo, f, local_dir=local, cache_dir=WEIGHTS_DIR / "hf")) for f in (model, mmproj))
 
@@ -63,11 +52,11 @@ class Response:
 
 @dataclass
 class Qwen:
-    repo: str = REPO
-    model: str = MODEL_FILE
-    mmproj: str = MMPROJ_FILE
-    ctx: int = CTX
-    seed: int = SEED
+    repo: str = "unsloth/Qwen3.5-27B-GGUF"
+    model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf"
+    mmproj: str = "mmproj-F16.gguf"
+    ctx: int = 65536
+    seed: int = 41
     port: int = 0
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
@@ -107,7 +96,7 @@ class Qwen:
         images = [images] if isinstance(images, (str, Path)) else list(images)
         content = [_image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
-        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, **(THINKING if think else INSTRUCT)}
+        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **({"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8})}
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
         with urllib.request.urlopen(req, timeout=24 * 3600) as r:
             data = json.load(r)
