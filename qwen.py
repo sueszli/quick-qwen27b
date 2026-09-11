@@ -21,53 +21,40 @@ from pathlib import Path
 from typing import Self
 
 
-class Storage:
-    @staticmethod
-    def everything(weights_dir: Path) -> Path:
-        weights_dir.mkdir(parents=True, exist_ok=True)
-        os.environ["HF_HOME"] = str(weights_dir / "hf")
-        os.environ["HF_HUB_CACHE"] = str(weights_dir / "hf")
-        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-        os.environ["HF_XET_CACHE"] = str(weights_dir / "hf" / "xet")
-        os.environ["TRANSFORMERS_CACHE"] = str(weights_dir / "hf")
-        os.environ["LLAMA_CACHE"] = str(weights_dir / "llama")
-        os.environ["TORCH_HOME"] = str(weights_dir / "torch")
-        os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(weights_dir / "torch" / "inductor")
-        os.environ["TRITON_CACHE_DIR"] = str(weights_dir / "torch" / "triton")
-        os.environ["CUDA_CACHE_PATH"] = str(weights_dir / "cuda")
-        os.environ["XDG_CACHE_HOME"] = str(weights_dir / "cache")
-        os.environ["XDG_DATA_HOME"] = str(weights_dir / "cache")
-        os.environ["XDG_CONFIG_HOME"] = str(weights_dir / "cache")
-        os.environ["TMPDIR"] = str(weights_dir / "tmp")
-        (weights_dir / "tmp").mkdir(exist_ok=True)
-        return weights_dir
+def set_storage(weights_dir: Path) -> Path:
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HOME"] = str(weights_dir / "hf")
+    os.environ["HF_HUB_CACHE"] = str(weights_dir / "hf")
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["HF_XET_CACHE"] = str(weights_dir / "hf" / "xet")
+    os.environ["TRANSFORMERS_CACHE"] = str(weights_dir / "hf")
+    os.environ["LLAMA_CACHE"] = str(weights_dir / "llama")
+    os.environ["TORCH_HOME"] = str(weights_dir / "torch")
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(weights_dir / "torch" / "inductor")
+    os.environ["TRITON_CACHE_DIR"] = str(weights_dir / "torch" / "triton")
+    os.environ["CUDA_CACHE_PATH"] = str(weights_dir / "cuda")
+    os.environ["XDG_CACHE_HOME"] = str(weights_dir / "cache")
+    os.environ["XDG_DATA_HOME"] = str(weights_dir / "cache")
+    os.environ["XDG_CONFIG_HOME"] = str(weights_dir / "cache")
+    os.environ["TMPDIR"] = str(weights_dir / "tmp")
+    (weights_dir / "tmp").mkdir(exist_ok=True)
+    return weights_dir
 
 
-class Seed:
-    @staticmethod
-    def everywhere(seed: int) -> None:
-        os.environ["PYTHONHASHSEED"] = str(seed)
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-        random.seed(seed)
-        Seed.numpy(seed)
-        Seed.torch(seed)
-
-    @staticmethod
-    def numpy(seed: int) -> None:
-        if importlib.util.find_spec("numpy") is None:
-            return
+def set_seed(seed: int = 41) -> int:
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    random.seed(seed)
+    if importlib.util.find_spec("numpy"):
         importlib.import_module("numpy").random.seed(seed)
-
-    @staticmethod
-    def torch(seed: int) -> None:
-        if importlib.util.find_spec("torch") is None:
-            return
+    if importlib.util.find_spec("torch"):
         torch = importlib.import_module("torch")
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True, warn_only=True)
+    return seed
 
 
 class Download:
@@ -79,12 +66,12 @@ class Download:
         root.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", root / "llama.tar.gz")
         with tarfile.open(root / "llama.tar.gz") as tar:
-            tar.extractall(root, filter=Download.strip_top_dir)
+            tar.extractall(root, filter=Download._strip_top_dir)
         (root / "llama.tar.gz").unlink()
         return root / "llama-server"
 
     @staticmethod
-    def strip_top_dir(member: tarfile.TarInfo, _: str) -> tarfile.TarInfo | None:
+    def _strip_top_dir(member: tarfile.TarInfo, _: str) -> tarfile.TarInfo | None:
         return member.replace(name=member.name.split("/", 1)[1]) if "/" in member.name else None
 
     @staticmethod
@@ -93,7 +80,7 @@ class Download:
         return Path(hf_hub_download(repo, filename, local_dir=weights_dir / repo.split("/")[1], cache_dir=weights_dir / "hf"))
 
     @staticmethod
-    def image_bytes(image: str | Path) -> bytes:
+    def _image_bytes(image: str | Path) -> bytes:
         if not str(image).startswith(("http://", "https://")):
             return Path(image).read_bytes()
         return urllib.request.urlopen(urllib.request.Request(str(image), headers={"user-agent": "quick-qwen27b"})).read()
@@ -107,7 +94,7 @@ class Server:
             return s.getsockname()[1]
 
     @staticmethod
-    def is_healthy(port: int) -> bool:
+    def _is_healthy(port: int) -> bool:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
             return True
@@ -119,7 +106,7 @@ class Server:
         for _ in range(timeout_s):
             if proc.poll() is not None:
                 raise RuntimeError(f"llama-server exited, see {log}")
-            if Server.is_healthy(port):
+            if Server._is_healthy(port):
                 return
             time.sleep(1)
         raise TimeoutError(f"llama-server did not come up, see {log}")
@@ -133,15 +120,15 @@ class Server:
 
 class Message:
     @staticmethod
-    def image_part(image: str | Path) -> dict:
+    def _image_part(image: str | Path) -> dict:
         if str(image).startswith("data:"):
             return {"type": "image_url", "image_url": {"url": str(image)}}
         mime = mimetypes.guess_type(str(image))[0] or "image/png"
-        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(Download.image_bytes(image)).decode()}"}}
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(Download._image_bytes(image)).decode()}"}}
 
     @staticmethod
     def user(text: str | None, images: list[str | Path]) -> dict:
-        return {"role": "user", "content": [Message.image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])}
+        return {"role": "user", "content": [Message._image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])}
 
     @staticmethod
     def sampling(think: bool) -> dict:
@@ -157,8 +144,8 @@ class Response:
 
 class Qwen:
     def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 65536, seed: int = 41, port: int = 0):
-        weights_dir = Storage.everything(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
-        Seed.everywhere(seed)
+        weights_dir = set_storage(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
+        set_seed(seed)
         self.seed = seed
         self.port = port or Server.free_port()
         self.log = weights_dir / "llama-server.log"
