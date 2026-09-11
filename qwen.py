@@ -43,6 +43,20 @@ def _image_part(image: str | Path) -> dict:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(Path(image).read_bytes()).decode()}"}}
 
 
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _healthy(port: int) -> bool:
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+        return True
+    except OSError:
+        return False
+
+
 @dataclass
 class Response:
     content: str
@@ -62,10 +76,7 @@ class Qwen:
 
     def __post_init__(self):
         model, mmproj = model_files(self.repo, self.model, self.mmproj)
-        if self.port == 0:
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                self.port = s.getsockname()[1]
+        self.port = self.port or _free_port()
         cmd = [str(server_binary()), "-m", str(model), "--mmproj", str(mmproj), "-ngl", "99", "-c", str(self.ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(self.seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
         log = WEIGHTS_DIR / "llama-server.log"
         with log.open("w") as f:
@@ -74,11 +85,9 @@ class Qwen:
         for _ in range(600):
             if self._proc.poll() is not None:
                 raise RuntimeError(f"llama-server exited, see {log}")
-            try:
-                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=1)
+            if _healthy(self.port):
                 return
-            except OSError:
-                time.sleep(1)
+            time.sleep(1)
         raise TimeoutError(f"llama-server did not come up, see {log}")
 
     def close(self):
