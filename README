@@ -11,7 +11,7 @@ Q5_K_XL GGUF on first use, runs llama-server on a free
 port, talks to it over the OpenAI chat api. fits a 24 GB
 card with 64k context.
 
-    $ uv add git+https://github.com/sueszli/qwen
+    $ uv add git+https://github.com/sueszli/quick-qwen27b
 
     from qwen import Qwen
 
