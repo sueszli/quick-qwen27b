@@ -97,7 +97,7 @@ def start_llama_server(weights_dir: Path, repo: str, model: str, mmproj: str, ct
 #
 
 
-def image_part(image: str | Path) -> dict:
+def encode_image(image: str | Path) -> dict:
     if str(image).startswith("data:"):
         return {"type": "image_url", "image_url": {"url": str(image)}}
     if str(image).startswith(("http://", "https://")):
@@ -125,7 +125,7 @@ class Qwen:
     def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
         images = [images] if isinstance(images, (str, Path)) else list(images or [])
         assert text or images, "need text or at least one image"
-        content = [image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
+        content = [encode_image(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
         sampling = {"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8}
         body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **sampling}
