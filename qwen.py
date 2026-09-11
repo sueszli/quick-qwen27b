@@ -20,7 +20,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from huggingface_hub import hf_hub_download
+
+class Storage:
+    @staticmethod
+    def everything(weights_dir: Path) -> Path:
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = str(weights_dir / "hf")
+        os.environ["HF_HUB_CACHE"] = str(weights_dir / "hf")
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        os.environ["HF_XET_CACHE"] = str(weights_dir / "hf" / "xet")
+        os.environ["TRANSFORMERS_CACHE"] = str(weights_dir / "hf")
+        os.environ["LLAMA_CACHE"] = str(weights_dir / "llama")
+        os.environ["TORCH_HOME"] = str(weights_dir / "torch")
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(weights_dir / "torch" / "inductor")
+        os.environ["TRITON_CACHE_DIR"] = str(weights_dir / "torch" / "triton")
+        os.environ["CUDA_CACHE_PATH"] = str(weights_dir / "cuda")
+        os.environ["XDG_CACHE_HOME"] = str(weights_dir / "cache")
+        os.environ["XDG_DATA_HOME"] = str(weights_dir / "cache")
+        os.environ["XDG_CONFIG_HOME"] = str(weights_dir / "cache")
+        os.environ["TMPDIR"] = str(weights_dir / "tmp")
+        (weights_dir / "tmp").mkdir(exist_ok=True)
+        return weights_dir
 
 
 class Seed:
@@ -69,6 +89,7 @@ class Download:
 
     @staticmethod
     def gguf(weights_dir: Path, repo: str, filename: str) -> Path:
+        hf_hub_download = importlib.import_module("huggingface_hub").hf_hub_download
         return Path(hf_hub_download(repo, filename, local_dir=weights_dir / repo.split("/")[1], cache_dir=weights_dir / "hf"))
 
     @staticmethod
@@ -136,8 +157,8 @@ class Response:
 
 class Qwen:
     def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 65536, seed: int = 41, port: int = 0):
+        weights_dir = Storage.everything(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
         Seed.everywhere(seed)
-        weights_dir = Path(weights_dir or Path(__file__).resolve().parent / "weights")
         self.seed = seed
         self.port = port or Server.free_port()
         self.log = weights_dir / "llama-server.log"
