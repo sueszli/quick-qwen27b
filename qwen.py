@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-
 #
 # utils
 #
@@ -28,21 +27,17 @@ from typing import Self
 
 def set_storage(weights_dir: Path) -> Path:
     weights_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["HF_HOME"] = str(weights_dir / "hf")
-    os.environ["HF_HUB_CACHE"] = str(weights_dir / "hf")
-    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    (weights_dir / "tmp").mkdir(exist_ok=True)
+    os.environ["HF_HOME"] = os.environ["HF_HUB_CACHE"] = os.environ["TRANSFORMERS_CACHE"] = str(weights_dir / "hf")
     os.environ["HF_XET_CACHE"] = str(weights_dir / "hf" / "xet")
-    os.environ["TRANSFORMERS_CACHE"] = str(weights_dir / "hf")
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     os.environ["LLAMA_CACHE"] = str(weights_dir / "llama")
     os.environ["TORCH_HOME"] = str(weights_dir / "torch")
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(weights_dir / "torch" / "inductor")
     os.environ["TRITON_CACHE_DIR"] = str(weights_dir / "torch" / "triton")
     os.environ["CUDA_CACHE_PATH"] = str(weights_dir / "cuda")
-    os.environ["XDG_CACHE_HOME"] = str(weights_dir / "cache")
-    os.environ["XDG_DATA_HOME"] = str(weights_dir / "cache")
-    os.environ["XDG_CONFIG_HOME"] = str(weights_dir / "cache")
+    os.environ["XDG_CACHE_HOME"] = os.environ["XDG_DATA_HOME"] = os.environ["XDG_CONFIG_HOME"] = str(weights_dir / "cache")
     os.environ["TMPDIR"] = str(weights_dir / "tmp")
-    (weights_dir / "tmp").mkdir(exist_ok=True)
     return weights_dir
 
 
@@ -63,37 +58,45 @@ def set_seed(seed: int = 41) -> int:
 
 
 #
-# setup + inference
+# setup
 #
 
 
 class Download:
     @staticmethod
-    def llama_server(weights_dir: Path, tag: str = "b10908") -> Path:
-        root = weights_dir / f"llama.cpp-{tag}"
-        if (root / "llama-server").exists():
-            return root / "llama-server"
-        root.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", root / "llama.tar.gz")
-        with tarfile.open(root / "llama.tar.gz") as tar:
-            tar.extractall(root, filter=Download._strip_top_dir)
-        (root / "llama.tar.gz").unlink()
-        return root / "llama-server"
-
-    @staticmethod
     def _strip_top_dir(member: tarfile.TarInfo, _: str) -> tarfile.TarInfo | None:
         return member.replace(name=member.name.split("/", 1)[1]) if "/" in member.name else None
 
     @staticmethod
-    def gguf(weights_dir: Path, repo: str, filename: str) -> Path:
-        hf_hub_download = importlib.import_module("huggingface_hub").hf_hub_download
-        return Path(hf_hub_download(repo, filename, local_dir=weights_dir / repo.split("/")[1], cache_dir=weights_dir / "hf"))
+    def llama_server(weights_dir: Path, tag: str = "b10908") -> Path:
+        root = weights_dir / f"llama.cpp-{tag}"
+        if not (root / "llama-server").exists():
+            root.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", root / "llama.tar.gz")
+            with tarfile.open(root / "llama.tar.gz") as tar:
+                tar.extractall(root, filter=Download._strip_top_dir)
+            (root / "llama.tar.gz").unlink()
+        assert os.access(root / "llama-server", os.X_OK), f"{root / 'llama-server'} is missing or not executable"
+        return root / "llama-server"
 
     @staticmethod
-    def _image_bytes(image: str | Path) -> bytes:
-        if not str(image).startswith(("http://", "https://")):
-            return Path(image).read_bytes()
-        return urllib.request.urlopen(urllib.request.Request(str(image), headers={"user-agent": "quick-qwen27b"})).read()
+    def gguf(weights_dir: Path, repo: str, filename: str) -> Path:
+        assert repo.count("/") == 1, f"repo must be user/name, got {repo}"
+        path = Path(importlib.import_module("huggingface_hub").hf_hub_download(repo, filename, local_dir=weights_dir / repo.split("/")[1], cache_dir=weights_dir / "hf"))
+        assert path.is_relative_to(weights_dir), f"{path} escaped {weights_dir}"
+        return path
+
+    @staticmethod
+    def image(image: str | Path) -> bytes:
+        if str(image).startswith(("http://", "https://")):
+            return urllib.request.urlopen(urllib.request.Request(str(image), headers={"user-agent": "quick-qwen27b"})).read()
+        assert Path(image).is_file(), f"{image} is not a file"
+        return Path(image).read_bytes()
+
+
+#
+# inference
+#
 
 
 class Server:
@@ -106,25 +109,24 @@ class Server:
     @staticmethod
     def _is_healthy(port: int) -> bool:
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
-            return True
+            return urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1).status == 200
         except OSError:
             return False
 
     @staticmethod
     def wait_until_healthy(proc: subprocess.Popen, port: int, log: Path, timeout_s: int = 600) -> None:
         for _ in range(timeout_s):
-            if proc.poll() is not None:
-                raise RuntimeError(f"llama-server exited, see {log}")
+            assert proc.poll() is None, f"llama-server exited, see {log}"
             if Server._is_healthy(port):
                 return
             time.sleep(1)
-        raise TimeoutError(f"llama-server did not come up, see {log}")
+        raise AssertionError(f"llama-server not healthy after {timeout_s}s, see {log}")
 
     @staticmethod
     def post_json(port: int, path: str, body: dict) -> dict:
         request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", json.dumps(body).encode(), {"content-type": "application/json"})
         with urllib.request.urlopen(request, timeout=24 * 3600) as response:
+            assert response.status == 200, f"{path} returned {response.status}"
             return json.load(response)
 
 
@@ -133,11 +135,11 @@ class Message:
     def _image_part(image: str | Path) -> dict:
         if str(image).startswith("data:"):
             return {"type": "image_url", "image_url": {"url": str(image)}}
-        mime = mimetypes.guess_type(str(image))[0] or "image/png"
-        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(Download._image_bytes(image)).decode()}"}}
+        return {"type": "image_url", "image_url": {"url": f"data:{mimetypes.guess_type(str(image))[0] or 'image/png'};base64,{base64.b64encode(Download.image(image)).decode()}"}}
 
     @staticmethod
     def user(text: str | None, images: list[str | Path]) -> dict:
+        assert text or images, "need text or at least one image"
         return {"role": "user", "content": [Message._image_part(i) for i in images] + ([{"type": "text", "text": text}] if text else [])}
 
     @staticmethod
@@ -154,9 +156,9 @@ class Response:
 
 class Qwen:
     def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 65536, seed: int = 41, port: int = 0):
+        assert ctx > 0 and 0 <= port < 65536, f"bad ctx={ctx} or port={port}"
         weights_dir = set_storage(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
-        set_seed(seed)
-        self.seed = seed
+        self.seed = set_seed(seed)
         self.port = port or Server.free_port()
         self.log = weights_dir / "llama-server.log"
         cmd = [str(Download.llama_server(weights_dir)), "-m", str(Download.gguf(weights_dir, repo, model)), "--mmproj", str(Download.gguf(weights_dir, repo, mmproj)), "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(self.port)]
@@ -165,8 +167,10 @@ class Qwen:
         Server.wait_until_healthy(self.proc, self.port, self.log)
 
     def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
+        assert max_tokens > 0, f"bad max_tokens={max_tokens}"
         messages = ([{"role": "system", "content": system}] if system else []) + [Message.user(text, [images] if isinstance(images, (str, Path)) else list(images or []))]
         data = Server.post_json(self.port, "/v1/chat/completions", {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": think}, **Message.sampling(think)})
+        assert data.get("choices"), f"no choices in response: {data}"
         return Response(data["choices"][0]["message"].get("content") or "", data["choices"][0]["message"].get("reasoning_content") or "", data["usage"])
 
     def close(self) -> None:
