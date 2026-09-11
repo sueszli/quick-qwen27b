@@ -4,7 +4,7 @@
 \__, / |__/|__/\___/_/ /_/
   /_/
 
-quick setup of https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
+inference template for https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
 
 currently the best model for your GeForce RTX 3090 Ti
 
