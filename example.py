@@ -10,7 +10,7 @@ DIM, RESET, CLEAR_LINE = "\033[2m", "\033[0m", "\r\033[K"
 
 
 def show(llm: Qwen, **kwargs) -> None:
-    start, tokens = time.time(), 0
+    start, tokens, usage = time.time(), 0, {}
     print(f"{DIM}processing prompt...{RESET}", end="", flush=True)
     for kind, value in llm.stream(**kwargs):
         if tokens == 0:
@@ -20,7 +20,11 @@ def show(llm: Qwen, **kwargs) -> None:
             print(f"{DIM}{value}{RESET}", end="", flush=True)
         if kind == "content":
             print(value, end="", flush=True)
-    print(f"\n{DIM}{tokens} tokens, {time.time() - start:.0f}s{RESET}\n")
+        if kind == "usage":
+            usage = value
+    if usage.get("finish_reason") != "stop":
+        print(f"\n{DIM}warning: truncated ({usage.get('finish_reason')}), raise max_tokens{RESET}", end="")
+    print(f"\n{DIM}{usage.get('completion_tokens', tokens)} tokens, {time.time() - start:.0f}s, {usage.get('timings', {}).get('predicted_per_second', 0):.1f} tok/s{RESET}\n")
 
 
 with Qwen() as llm:

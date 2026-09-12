@@ -80,7 +80,7 @@ def download_gguf(weights_dir: Path, repo: str, filename: str) -> Path:
 
 
 def start_llama_server(weights_dir: Path, repo: str, model: str, mmproj: str, ctx: int, seed: int, port: int) -> subprocess.Popen:
-    cmd = [str(download_llama_server(weights_dir)), "-m", str(download_gguf(weights_dir, repo, model)), "--mmproj", str(download_gguf(weights_dir, repo, mmproj)), "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(port)]
+    cmd = [str(download_llama_server(weights_dir)), "-m", str(download_gguf(weights_dir, repo, model)), "--mmproj", str(download_gguf(weights_dir, repo, mmproj)), "--no-mmproj-offload", "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(port)]
     proc = subprocess.Popen(cmd, stdout=(weights_dir / "llama-server.log").open("w"), stderr=subprocess.STDOUT)
     atexit.register(proc.terminate)
     for _ in range(600):
@@ -117,34 +117,52 @@ class Response:
 
 
 class Qwen:
-    def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 65536, seed: int = 41, port: int = 8080):
+    def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 131072, seed: int = 41, port: int = 8080):
         weights_dir = set_storage(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
         self.seed = set_seed(seed)
+        self.ctx = ctx
         self.port = port
         self.proc = start_llama_server(weights_dir, repo, model, mmproj, ctx, seed, port)
 
-    def stream(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Iterator[tuple[str, str | dict]]:
+    def stream(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 81920, system: str | None = None) -> Iterator[tuple[str, str | dict]]:
         images = [images] if isinstance(images, (str, Path)) else list(images or [])
         assert text or images, "need text or at least one image"
         content = [encode_image(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
         sampling = {"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8}
-        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "stream": True, "stream_options": {"include_usage": True}, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **sampling}
+        body = {
+            "messages": messages,
+            "seed": self.seed,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "chat_template_kwargs": {"enable_thinking": think},
+            "top_k": 20,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "repeat_last_n": self.ctx,  # vllm penalizes the whole output, llama.cpp defaults to 64 tokens
+            "repeat_penalty": 1.0,
+            "samplers": ["penalties", "top_k", "temperature", "top_p", "min_p"],  # temperature before top_p like vllm
+            **sampling,
+        }
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
+        finish_reason = None
         with urllib.request.urlopen(request, timeout=24 * 3600) as response:
             for line in response:
                 if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
                     continue
                 chunk = json.loads(line[6:])
-                delta = chunk["choices"][0]["delta"] if chunk.get("choices") else {}
+                choice = chunk["choices"][0] if chunk.get("choices") else {}
+                delta = choice.get("delta") or {}
+                finish_reason = choice.get("finish_reason") or finish_reason
                 if delta.get("reasoning_content"):
                     yield "reasoning", delta["reasoning_content"]
                 if delta.get("content"):
                     yield "content", delta["content"]
                 if chunk.get("usage"):
-                    yield "usage", chunk["usage"]
+                    yield "usage", {**chunk["usage"], "finish_reason": finish_reason, "timings": chunk.get("timings", {})}
 
-    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
+    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 81920, system: str | None = None) -> Response:
         parts = {"reasoning": [], "content": [], "usage": [{}]}
         for kind, value in self.stream(text, images, think, max_tokens, system):
             parts[kind].append(value)
