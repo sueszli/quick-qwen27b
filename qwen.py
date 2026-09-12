@@ -40,7 +40,6 @@ def set_storage(weights_dir: Path) -> Path:
 
 
 def set_seed(seed: int = 41) -> int:
-    # only the client process is seeded here; llama-server is seeded via --seed and per-request "seed"
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     return seed
@@ -70,8 +69,6 @@ def download_gguf(weights_dir: Path, repo: str, filename: str) -> Path:
 
 
 def start_llama_server(weights_dir: Path, repo: str, model: str, mmproj: str, ctx: int, seed: int, port: int) -> subprocess.Popen:
-    # --no-mmproj-offload: vision encoder on CPU (images still work), frees ~0.9 GiB VRAM so 128k ctx fits on 24 GB
-    # -np 1: one slot gets the whole context. -fa on + q8_0 KV: only 16/64 layers have KV (rest is gated delta-net, f32 state, unaffected)
     cmd = [str(download_llama_server(weights_dir)), "-m", str(download_gguf(weights_dir, repo, model)), "--mmproj", str(download_gguf(weights_dir, repo, mmproj)), "--no-mmproj-offload", "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(port)]
     proc = subprocess.Popen(cmd, stdout=(weights_dir / "llama-server.log").open("w"), stderr=subprocess.STDOUT)
     atexit.register(proc.terminate)
@@ -110,7 +107,6 @@ class Response:
 
 class Qwen:
     def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 131072, seed: int = 41, port: int = 8080):
-        # ctx: qwen recommends >= 128k "to preserve thinking capabilities"; measured 23.5/24 GiB on a 3090 Ti with this config
         weights_dir = set_storage(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
         self.seed = set_seed(seed)
         self.ctx = ctx
@@ -118,12 +114,10 @@ class Qwen:
         self.proc = start_llama_server(weights_dir, repo, model, mmproj, ctx, seed, port)
 
     def stream(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 81920, system: str | None = None) -> Iterator[tuple[str, str | dict]]:
-        # max_tokens: qwen recommends 81920 for hard math/code so thinking + answer are not cut off; check usage["finish_reason"] == "stop"
         images = [images] if isinstance(images, (str, Path)) else list(images or [])
         assert text or images, "need text or at least one image"
         content = [encode_image(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
-        # qwen presets: thinking = general/reasoning (1.0/0.95), non-thinking = instruct general (0.7/0.8)
         sampling = {"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8}
         body = {
             "messages": messages,
@@ -134,12 +128,10 @@ class Qwen:
             "chat_template_kwargs": {"enable_thinking": think},
             "top_k": 20,
             "min_p": 0.0,
-            # qwen's presence_penalty=1.5 assumes vllm semantics (whole output); llama.cpp only looks at the last repeat_last_n tokens (default 64), so widen to the full context
             "presence_penalty": 1.5,
-            "repeat_last_n": self.ctx,
+            "repeat_last_n": self.ctx,  # vllm penalizes the whole output, llama.cpp defaults to 64 tokens
             "repeat_penalty": 1.0,
-            # llama.cpp applies temperature last by default; vllm tempers before top_p. match vllm so the presets mean the same thing
-            "samplers": ["penalties", "top_k", "temperature", "top_p", "min_p"],
+            "samplers": ["penalties", "top_k", "temperature", "top_p", "min_p"],  # temperature before top_p like vllm
             **sampling,
         }
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
@@ -157,7 +149,6 @@ class Qwen:
                 if delta.get("content"):
                     yield "content", delta["content"]
                 if chunk.get("usage"):
-                    # finish_reason == "length" means max_tokens (or ctx) was hit, possibly mid-thought with empty content
                     yield "usage", {**chunk["usage"], "finish_reason": finish_reason, "timings": chunk.get("timings", {})}
 
     def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 81920, system: str | None = None) -> Response:
