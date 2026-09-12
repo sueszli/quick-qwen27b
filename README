@@ -6,7 +6,8 @@
 
 inference template for https://huggingface.co/unsloth/Qwen3.5-27B-GGUF
 
-currently my favorite model for a GeForce RTX 3090 Ti
+my favorite model on a GeForce RTX 3090 Ti.
+approximately Claude Sonnet 4.5-class performance.
 
 quick demo:
 
