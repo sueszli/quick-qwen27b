@@ -41,7 +41,17 @@ def set_storage(weights_dir: Path) -> Path:
 
 def set_seed(seed: int = 41) -> int:
     os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     random.seed(seed)
+    if importlib.util.find_spec("numpy"):
+        importlib.import_module("numpy").random.seed(seed)
+    if importlib.util.find_spec("torch"):
+        torch = importlib.import_module("torch")
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
     return seed
 
 
