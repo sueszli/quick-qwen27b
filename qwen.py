@@ -40,18 +40,9 @@ def set_storage(weights_dir: Path) -> Path:
 
 
 def set_seed(seed: int = 41) -> int:
+    # only the client process is seeded here; llama-server is seeded via --seed and per-request "seed"
     os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     random.seed(seed)
-    if importlib.util.find_spec("numpy"):
-        importlib.import_module("numpy").random.seed(seed)
-    if importlib.util.find_spec("torch"):
-        torch = importlib.import_module("torch")
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.use_deterministic_algorithms(True, warn_only=True)
     return seed
 
 
@@ -79,7 +70,9 @@ def download_gguf(weights_dir: Path, repo: str, filename: str) -> Path:
 
 
 def start_llama_server(weights_dir: Path, repo: str, model: str, mmproj: str, ctx: int, seed: int, port: int) -> subprocess.Popen:
-    cmd = [str(download_llama_server(weights_dir)), "-m", str(download_gguf(weights_dir, repo, model)), "--mmproj", str(download_gguf(weights_dir, repo, mmproj)), "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(port)]
+    # --no-mmproj-offload: vision encoder on CPU (images still work), frees ~0.9 GiB VRAM so 128k ctx fits on 24 GB
+    # -np 1: one slot gets the whole context. -fa on + q8_0 KV: only 16/64 layers have KV (rest is gated delta-net, f32 state, unaffected)
+    cmd = [str(download_llama_server(weights_dir)), "-m", str(download_gguf(weights_dir, repo, model)), "--mmproj", str(download_gguf(weights_dir, repo, mmproj)), "--no-mmproj-offload", "-ngl", "99", "-c", str(ctx), "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "--seed", str(seed), "--reasoning-format", "deepseek", "--host", "127.0.0.1", "--port", str(port)]
     proc = subprocess.Popen(cmd, stdout=(weights_dir / "llama-server.log").open("w"), stderr=subprocess.STDOUT)
     atexit.register(proc.terminate)
     for _ in range(600):
@@ -116,34 +109,58 @@ class Response:
 
 
 class Qwen:
-    def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 65536, seed: int = 41, port: int = 8080):
+    def __init__(self, weights_dir: str | Path | None = None, repo: str = "unsloth/Qwen3.5-27B-GGUF", model: str = "Qwen3.5-27B-UD-Q5_K_XL.gguf", mmproj: str = "mmproj-F16.gguf", ctx: int = 131072, seed: int = 41, port: int = 8080):
+        # ctx: qwen recommends >= 128k "to preserve thinking capabilities"; measured 23.5/24 GiB on a 3090 Ti with this config
         weights_dir = set_storage(Path(weights_dir or Path(__file__).resolve().parent / "weights"))
         self.seed = set_seed(seed)
+        self.ctx = ctx
         self.port = port
         self.proc = start_llama_server(weights_dir, repo, model, mmproj, ctx, seed, port)
 
-    def stream(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Iterator[tuple[str, str | dict]]:
+    def stream(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 81920, system: str | None = None) -> Iterator[tuple[str, str | dict]]:
+        # max_tokens: qwen recommends 81920 for hard math/code so thinking + answer are not cut off; check usage["finish_reason"] == "stop"
         images = [images] if isinstance(images, (str, Path)) else list(images or [])
         assert text or images, "need text or at least one image"
         content = [encode_image(i) for i in images] + ([{"type": "text", "text": text}] if text else [])
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
+        # qwen presets: thinking = general/reasoning (1.0/0.95), non-thinking = instruct general (0.7/0.8)
         sampling = {"temperature": 1.0, "top_p": 0.95} if think else {"temperature": 0.7, "top_p": 0.8}
-        body = {"messages": messages, "seed": self.seed, "max_tokens": max_tokens, "stream": True, "stream_options": {"include_usage": True}, "chat_template_kwargs": {"enable_thinking": think}, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, **sampling}
+        body = {
+            "messages": messages,
+            "seed": self.seed,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "chat_template_kwargs": {"enable_thinking": think},
+            "top_k": 20,
+            "min_p": 0.0,
+            # qwen's presence_penalty=1.5 assumes vllm semantics (whole output); llama.cpp only looks at the last repeat_last_n tokens (default 64), so widen to the full context
+            "presence_penalty": 1.5,
+            "repeat_last_n": self.ctx,
+            "repeat_penalty": 1.0,
+            # llama.cpp applies temperature last by default; vllm tempers before top_p. match vllm so the presets mean the same thing
+            "samplers": ["penalties", "top_k", "temperature", "top_p", "min_p"],
+            **sampling,
+        }
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
+        finish_reason = None
         with urllib.request.urlopen(request, timeout=24 * 3600) as response:
             for line in response:
                 if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
                     continue
                 chunk = json.loads(line[6:])
-                delta = chunk["choices"][0]["delta"] if chunk.get("choices") else {}
+                choice = chunk["choices"][0] if chunk.get("choices") else {}
+                delta = choice.get("delta") or {}
+                finish_reason = choice.get("finish_reason") or finish_reason
                 if delta.get("reasoning_content"):
                     yield "reasoning", delta["reasoning_content"]
                 if delta.get("content"):
                     yield "content", delta["content"]
                 if chunk.get("usage"):
-                    yield "usage", chunk["usage"]
+                    # finish_reason == "length" means max_tokens (or ctx) was hit, possibly mid-thought with empty content
+                    yield "usage", {**chunk["usage"], "finish_reason": finish_reason, "timings": chunk.get("timings", {})}
 
-    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 32768, system: str | None = None) -> Response:
+    def chat(self, text: str | None = None, images: list[str | Path] | str | Path | None = None, think: bool = True, max_tokens: int = 81920, system: str | None = None) -> Response:
         parts = {"reasoning": [], "content": [], "usage": [{}]}
         for kind, value in self.stream(text, images, think, max_tokens, system):
             parts[kind].append(value)
