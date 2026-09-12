@@ -90,7 +90,7 @@ def start_llama_server(weights_dir: Path, repo: str, model: str, mmproj: str, ct
             return proc
         except OSError:
             time.sleep(1)
-    raise AssertionError(f"llama-server not healthy after 600s, see {weights_dir / 'llama-server.log'}")
+    assert False, f"llama-server not healthy after 600s, see {weights_dir / 'llama-server.log'}"
 
 
 #
